@@ -100,6 +100,8 @@ class TRTLLMHttpServer:
         from tensorrt_llm import AsyncLLM
         from tensorrt_llm.llmapi import CudaGraphConfig, KvCacheConfig
         from tensorrt_llm.serve import OpenAIServer
+        from tensorrt_llm.quantization.mode import QuantAlgo
+        from tensorrt_llm.models.modeling_utils import QuantConfig
 
         engine_kwargs = self.config.get("engine_kwargs", {}).get("trtllm", {}) or {}
         kv_cache_config = KvCacheConfig(
@@ -114,6 +116,21 @@ class TRTLLMHttpServer:
 
         per_worker_gpu_share = 1.0 / self.max_colocate_count
 
+        quantization = self.config.quantization
+        quant_config = None
+        if quantization is not None:
+            if quantization == "fp8":
+                quant_config = QuantConfig(
+                    quant_algo=QuantAlgo.FP8_BLOCK_SCALES,
+                )
+                if self.config.load_format != "dummy":
+                    raise ValueError("FP8 quantization is only supported for dummy load format")
+            else:
+                raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
+        if quant_config is not None:
+            engine_kwargs["quant_config"] = quant_config
+        self.config.quantization_config = quant_config
+
         llm_kwargs = {
             "model": self.model_config.local_path,
             "backend": "pytorch",
@@ -125,6 +142,7 @@ class TRTLLMHttpServer:
             "max_batch_size": self.config.max_num_seqs,
             "max_num_tokens": self.config.max_num_batched_tokens,
             "tensor_parallel_size": self.config.tensor_model_parallel_size,
+            "load_format": self.config.load_format,
             "trust_remote_code": self.model_config.trust_remote_code,
             "placement_groups": self.pgs,
             "placement_bundle_indices": self.bundle_indices,
