@@ -381,6 +381,7 @@ class TRTLLMReplica(RolloutReplica):
             workers=self.workers,
             replica_rank=self.replica_rank,
             max_colocate_count=self.resource_pool.max_colocate_count,
+            gpus_per_node=self.gpus_per_node,
             pgs=pgs,
             bundle_indices=bundle_indices,
         )
