@@ -16,6 +16,7 @@ import logging
 import os
 from typing import Any, Optional
 
+import psutil
 import ray
 import torch
 from omegaconf import DictConfig
@@ -60,6 +61,7 @@ class TRTLLMHttpServer:
         workers: list[ActorHandle],
         replica_rank: int,
         max_colocate_count: int,
+        gpus_per_node: int,
         pgs: list[PlacementGroup] = None,
         bundle_indices: list[list[int]] = None,
     ):
@@ -82,6 +84,7 @@ class TRTLLMHttpServer:
         self.workers = workers
         self.replica_rank = replica_rank
         self.max_colocate_count = max_colocate_count
+        self.gpus_per_node = gpus_per_node
         self.pgs = pgs
         self.bundle_indices = bundle_indices
 
@@ -110,7 +113,7 @@ class TRTLLMHttpServer:
 
     async def launch_server(self):
         from tensorrt_llm import AsyncLLM
-        from tensorrt_llm.llmapi import CudaGraphConfig, KvCacheConfig
+        from tensorrt_llm.llmapi import CudaGraphConfig, KvCacheConfig, SchedulerConfig, CapacitySchedulerPolicy
         from tensorrt_llm.serve import OpenAIServer
 
         engine_kwargs = self.config.get("engine_kwargs", {}).get("trtllm", {}) or {}
@@ -171,9 +174,20 @@ class TRTLLMHttpServer:
                         enable_padding=True,
                         batch_sizes=self.config.cudagraph_capture_sizes,
                         max_batch_size=0 if self.config.cudagraph_capture_sizes else self.config.max_num_seqs,
+                    ),
+
+                    "scheduler_config": SchedulerConfig(
+                        capacity_scheduler_policy=CapacitySchedulerPolicy.MAX_UTILIZATION,
                     )
                 }
             )
+
+            total_memory = psutil.virtual_memory().total
+            alignment = 1024 * 1024  # 1MB
+            rank_usage = int(total_memory * 0.5 / self.gpus_per_node)
+            rank_usage = (rank_usage + alignment - 1) // alignment * alignment
+
+            llm_kwargs["kv_cache_config"].host_cache_size=rank_usage
 
         self.llm = await AsyncLLM(**llm_kwargs)
 
