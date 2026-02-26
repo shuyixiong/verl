@@ -14,6 +14,7 @@
 import asyncio
 import logging
 import os
+import socket
 from typing import Any, Optional
 
 import ray
@@ -26,6 +27,7 @@ from ray.util.placement_group import PlacementGroup
 from verl.single_controller.ray import RayClassWithInitArgs, SubRayResourcePool
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.net_utils import is_valid_ipv6_address
+from verl.utils.profiler.performance import format_cpu_memory_str, get_cpu_memory_info, get_gpu_memory_by_processes, get_local_ip
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.trtllm_rollout.trtllm_rollout import ServerAdapter
@@ -189,7 +191,25 @@ class TRTLLMHttpServer:
                 }
             )
 
+        local_ip = get_local_ip()
+        cpu_str = format_cpu_memory_str(get_cpu_memory_info())
+        num_gpus = torch.cuda.device_count()
+        for device_id in range(num_gpus):
+            memory_info = get_gpu_memory_by_processes(device_id=device_id)
+            logger.warning(
+                f"[ip={local_ip}] [replica_rank={self.replica_rank}] Before AsyncLLM init, "
+                f"memory breakdown: {memory_info}, cpu memory: {cpu_str}"
+            )
+
         self.llm = await AsyncLLM(**llm_kwargs)
+
+        cpu_str = format_cpu_memory_str(get_cpu_memory_info())
+        for device_id in range(num_gpus):
+            memory_info = get_gpu_memory_by_processes(device_id=device_id)
+            logger.warning(
+                f"[ip={local_ip}] [replica_rank={self.replica_rank}] After AsyncLLM init, "
+                f"memory breakdown: {memory_info}, cpu memory: {cpu_str}"
+            )
 
         trtllm_server = OpenAIServer(
             llm=self.llm,
@@ -246,12 +266,30 @@ class TRTLLMHttpServer:
         if not self.config.free_cache_engine:
             return
 
+        local_ip = get_local_ip()
+        cpu_str = format_cpu_memory_str(get_cpu_memory_info())
+        num_gpus = torch.cuda.device_count()
+        for device_id in range(num_gpus):
+            memory_info = get_gpu_memory_by_processes(device_id=device_id)
+            logger.warning(
+                f"[ip={local_ip}] [replica_rank={self.replica_rank}] Before sleep, "
+                f"memory breakdown: {memory_info}, cpu memory: {cpu_str}"
+            )
+
         if self.rollout_mode == RolloutMode.HYBRID:
             await self.llm.release(tags=ServerAdapter.get_full_tags())
         elif self.rollout_mode == RolloutMode.COLOCATED:
             await self.llm.release(tags=ServerAdapter.get_full_tags())
         elif self.rollout_mode == RolloutMode.STANDALONE:
             logger.info("skip sleep in standalone mode")
+
+        cpu_str = format_cpu_memory_str(get_cpu_memory_info())
+        for device_id in range(num_gpus):
+            memory_info = get_gpu_memory_by_processes(device_id=device_id)
+            logger.warning(
+                f"[ip={local_ip}] [replica_rank={self.replica_rank}] After sleep, "
+                f"memory breakdown: {memory_info}, cpu memory: {cpu_str}"
+            )
 
     async def report_device_ids(self) -> list[str]:
         """Report GPU device UUIDs from TRT-LLM workers."""

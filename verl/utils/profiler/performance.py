@@ -17,14 +17,166 @@ import inspect
 import logging
 from contextlib import contextmanager
 from typing import Any, Optional
-
+import os
+import psutil
+import socket
 import torch
 import torch.distributed as dist
+import pynvml
+import psutil
 from codetiming import Timer
 
 from verl.utils.device import get_device_id, get_torch_device
 from verl.utils.logger import DecoratorLoggerBase
 
+_pynvmlInited = False
+
+def get_local_ip():
+    """Get the local IP address of the current machine."""
+    try:
+        # Create a socket to get the local IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "unknown"
+
+def get_physical_device_id():
+    """Get the physical GPU device ID by matching device UUID.
+    
+    In distributed environments with CUDA_VISIBLE_DEVICES, torch.cuda.current_device()
+    always returns 0 (logical device). This function maps the current torch device's
+    UUID to its physical GPU index.
+    
+    Returns:
+        int: Physical GPU device index
+        
+    Raises:
+        RuntimeError: If GPU device matching fails
+    """
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available")
+    
+    # Get the UUID of current torch device
+    current_device_props = torch.cuda.get_device_properties(torch.cuda.current_device())
+    current_uuid = current_device_props.uuid
+    # Convert torch UUID object to string
+    current_uuid_str = str(current_uuid)
+    
+    # Initialize pynvml and find matching physical device
+    pynvml.nvmlInit()
+    device_count = pynvml.nvmlDeviceGetCount()
+    
+    for physical_id in range(device_count):
+        handle = pynvml.nvmlDeviceGetHandleByIndex(physical_id)
+        uuid = pynvml.nvmlDeviceGetUUID(handle)
+        # Match UUID - normalize by removing "GPU-" or "MIG-" prefixes and comparing
+        uuid_normalized = uuid.replace("GPU-", "").replace("MIG-", "").lower()
+        current_uuid_normalized = current_uuid_str.replace("GPU-", "").replace("MIG-", "").lower()
+        if uuid_normalized == current_uuid_normalized:
+            pynvml.nvmlShutdown()
+            return physical_id
+    
+    pynvml.nvmlShutdown()
+    
+    # If no match found, raise error
+    raise RuntimeError(f"Failed to match device UUID {current_uuid_str} to any physical GPU. "
+                       f"Checked {device_count} devices.")
+
+
+def get_cpu_memory_info() -> dict:
+    """Return node-level system RAM, this process's RSS, and top 10 processes by RSS, all in GB."""
+    try:
+        vm = psutil.virtual_memory()
+        current = psutil.Process()
+        proc_rss = current.memory_info().rss
+        process_list = []
+        for p in psutil.process_iter(["pid", "name"]):
+            try:
+                rss = p.memory_info().rss
+                name = (p.info.get("name") or p.name() or "?").strip()
+                if not name:
+                    name = "?"
+                process_list.append((p.info["pid"], name[:64], rss))
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        process_list.sort(key=lambda x: x[2], reverse=True)
+        top10 = [
+            {"pid": pid, "name": name, "rss_gb": round(rss / (1024**3), 2)}
+            for pid, name, rss in process_list[:10]
+        ]
+        if not top10:
+            top10 = [
+                {
+                    "pid": current.pid,
+                    "name": (current.name() or "current")[:64],
+                    "rss_gb": round(proc_rss / (1024**3), 2),
+                }
+            ]
+        return {
+            "node_total_gb": round(vm.total / (1024**3), 2),
+            "node_used_gb": round(vm.used / (1024**3), 2),
+            "node_avail_gb": round(vm.available / (1024**3), 2),
+            "node_used_pct": round(vm.percent, 1),
+            "proc_rss_gb": round(proc_rss / (1024**3), 2),
+            "top10_procs": top10,
+        }
+    except Exception:
+        return {}
+
+
+def format_cpu_memory_str(cpu_info: Optional[dict] = None) -> str:
+    """Format CPU memory info (from get_cpu_memory_info()) as a log string. Always includes top10_procs."""
+    if not cpu_info:
+        return "N/A"
+    top10 = cpu_info.get("top10_procs", [])
+    top10_str = ", ".join(
+        f"pid={p['pid']}({p['name']}):{p['rss_gb']}GB" for p in top10
+    ) if top10 else "N/A"
+    return (
+        f"cpu_node_used/avail/total (GB): "
+        f"{cpu_info.get('node_used_gb', '?')}/{cpu_info.get('node_avail_gb', '?')}/{cpu_info.get('node_total_gb', '?')} "
+        f"({cpu_info.get('node_used_pct', '?')}%), proc_rss: {cpu_info.get('proc_rss_gb', '?')} GB, "
+        f"top10_procs: [{top10_str}]"
+    )
+
+
+def get_gpu_memory_by_processes(device_id: int = None):
+    # Check if we're on a GPU device
+    if not torch.cuda.is_available():
+        return {'device_id': 'cpu', 'error': 'GPU memory info not available on CPU device'}
+
+    if device_id is None:
+        # Use physical device ID instead of logical device ID
+        device_id = get_physical_device_id()
+    
+    pynvml.nvmlInit()
+    handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
+    
+    processes = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
+    
+    mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+    
+    pynvml.nvmlShutdown()
+    
+    def get_process_name(pid):
+        try:
+            return psutil.Process(pid).cmdline()[0]
+        except (psutil.NoSuchProcess, psutil.AccessDenied, IndexError):
+            return "Unknown"
+    
+    return {
+        'device_id': device_id,
+        'total_gb': mem_info.total / (1024 ** 3),
+        'used_gb': mem_info.used / (1024 ** 3),
+        'free_gb': mem_info.free / (1024 ** 3),
+        'processes': [
+            {'pid': p.pid, 'process_name': get_process_name(p.pid), 'memory_gb': p.usedGpuMemory / (1024 ** 3)}
+            for p in processes
+        ]
+    }
 
 def _get_current_mem_info(unit: str = "GB", precision: int = 2) -> tuple[str]:
     """Get current memory usage.
@@ -60,7 +212,7 @@ def _get_current_mem_info(unit: str = "GB", precision: int = 2) -> tuple[str]:
     return mem_allocated, mem_reserved, mem_used, mem_total
 
 
-def log_gpu_memory_usage(head: str, logger: logging.Logger = None, level=logging.DEBUG, rank: int = 0):
+def log_gpu_memory_usage(head: str, logger: logging.Logger = None, level=logging.WARNING, rank: int = 0):
     """Log GPU memory usage information.
 
     Args:
@@ -71,9 +223,16 @@ def log_gpu_memory_usage(head: str, logger: logging.Logger = None, level=logging
     """
     if (not dist.is_initialized()) or (rank is None) or (dist.get_rank() == rank):
         mem_allocated, mem_reserved, mem_used, mem_total = _get_current_mem_info()
+        cpu = get_cpu_memory_info()
+        cpu_str = format_cpu_memory_str(cpu)
+        local_ip = get_local_ip()
+        # Get physical device ID to query correct GPU
+        physical_device_id = get_physical_device_id()
         message = (
-            f"{head}, memory allocated (GB): {mem_allocated}, memory reserved (GB): {mem_reserved}, "
-            f"device memory used/total (GB): {mem_used}/{mem_total}"
+            f"[ip={local_ip}] {head}, memory allocated (GB): {mem_allocated}, memory reserved (GB): {mem_reserved}, "
+            f"device memory used/total (GB): {mem_used}/{mem_total}, "
+            f"memory breakdown: {get_gpu_memory_by_processes(physical_device_id)}"
+            f", cpu memory: {cpu_str}" if cpu_str else ""
         )
 
         if logger is None:

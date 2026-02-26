@@ -719,6 +719,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
 
         if self.config.rollout.free_cache_engine:
             await self.rollout.resume(tags=["weights"])
+            log_gpu_memory_usage("After resume weights", logger=logger)
         if do_lora_base_sync:
             # Base layer sync
             per_tensor_param_lora_base = self.bridge.export_hf_weights(
@@ -734,11 +735,15 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             self.base_sync_done = True
 
         await self.rollout.update_weights(per_tensor_param, peft_config=peft_config, base_sync_done=True)
+        log_gpu_memory_usage("After update weights", logger=logger)
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.actor.actor_module)
+            log_gpu_memory_usage("After offload actor params during rollout_mode", logger=logger)
         aggressive_empty_cache(force_sync=True)
+        log_gpu_memory_usage("After aggressive_empty_cache", logger=logger)
         if self.config.rollout.free_cache_engine:
             await self.rollout.resume(tags=["kv_cache"])
+            log_gpu_memory_usage("After resume kv_cache", logger=logger)
 
         set_expandable_segments(True)
 
