@@ -56,6 +56,7 @@ from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, shou
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
 from verl.utils.import_utils import load_class_from_fqn
+from verl.utils.profiler.performance import format_cpu_memory_str, get_cpu_memory_info
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
 from verl.utils.rollout_skip import RolloutSkip
@@ -1513,8 +1514,13 @@ class RayPPOTrainer:
                         ):
                             if esi_close_to_expiration:
                                 print("Force saving checkpoint: ESI instance expiration approaching.")
+                            
+                            cpu_mem_before = get_cpu_memory_info()
+                            logger.log(f"Before save_checkpoint, CPU memory: {format_cpu_memory_str(cpu_mem_before)}", level=logging.INFO)
                             with marked_timer("save_checkpoint", timing_raw, color="green"):
                                 self._save_checkpoint()
+                            cpu_mem_after = get_cpu_memory_info()
+                            logger.log(f"After save_checkpoint, CPU memory: {format_cpu_memory_str(cpu_mem_after)}", level=logging.INFO)
 
                         # update weights from trainer to rollout
                         with marked_timer("update_weights", timing_raw, color="red"):

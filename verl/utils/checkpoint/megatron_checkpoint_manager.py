@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
 import inspect
 import json
 import logging
 import os
+import sys
 import random
 from collections.abc import Callable
 from dataclasses import asdict
@@ -53,6 +55,26 @@ if not mcore_ge_014:
         megatron.core.__version__,
     )
 
+
+def _debug_state_dict_referrers(state_dict, rank: int, label: str = "state_dict"):
+    """When VERL_DEBUG_STATE_DICT_REFCOUNT=1, log refcount and who refers to state_dict."""
+    rc = sys.getrefcount(state_dict)
+    referrers = gc.get_referrers(state_dict)
+    log_with_rank(
+        f"[{label}] refcount={rc} (expect 2 if only local var), referrers={len(referrers)}",
+        rank=rank,
+        logger=logger,
+    )
+    for i, ref in enumerate(referrers):
+        try:
+            info = f"  [{i}] {type(ref).__name__}"
+            if isinstance(ref, dict):
+                info += f" keys={list(ref.keys())[:5]}..."
+            elif hasattr(ref, "__name__"):
+                info += f" {getattr(ref, '__name__', '')}"
+            log_with_rank(info, rank=rank, logger=logger)
+        except Exception:
+            log_with_rank(f"  [{i}] {type(ref).__name__} (repr failed)", rank=rank, logger=logger)
 
 class MegatronCheckpointManager(BaseCheckpointManager):
     """
@@ -530,6 +552,9 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             if not self.checkpoint_config.async_save:
                 assert async_save_request is None, "Async save request should be None when not using async save."
                 torch.distributed.barrier()
+                _debug_state_dict_referrers(state_dict, self.rank, "state_dict(dist_ckpt)")
+                del state_dict
+                gc.collect()
         else:
             assert self.use_hf_checkpoint, "When not using distributed checkpointing, use_hf_checkpoint should be True."
             # Generate optimizer and exra state dicts
@@ -553,6 +578,8 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             if not self.checkpoint_config.async_save:
                 assert async_save_request is None, "Async save request should be None when not using async save."
                 torch.distributed.barrier()
+                _debug_state_dict_referrers(state_dict, self.rank, "state_dict(optim_extra)")
+                del state_dict
 
         if self.should_save_model:
             # Save adapter-only checkpoint if PEFT is enabled
@@ -651,6 +678,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 transformer_config_path = get_transformer_config_checkpoint_path(local_path)
                 with open(transformer_config_path, "w") as f:
                     json.dump(transformer_config_dict, f, indent=2)
+                del transformer_config_dict
 
         if self.should_save_hf_model and not self.use_hf_checkpoint:
             # wait for everyone to dump to local
@@ -718,6 +746,8 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                             logger=logger,
                             log_only_rank_0=True,
                         )
+                _debug_state_dict_referrers(state_dict, "state_dict(hf_model)")
+                del state_dict
 
         def finalize_save_fn():
             # Rank 0 uploads checkpoint to HDFS if hdfs_path is provided
@@ -747,6 +777,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                     f.write(str(global_step))
 
             self.register_checkpoint(local_path, max_ckpt_to_keep)
+            gc.collect()
 
         if self.checkpoint_config.async_save:
             assert async_save_request is not None, "Async save request should not be None when using async save."

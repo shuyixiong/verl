@@ -268,18 +268,29 @@ class GPUMemoryLogger(DecoratorLoggerBase):
     def log(self, func, *args, **kwargs):
         name = func.__name__
         mem_allocated, mem_reserved, mem_used, mem_total = _get_current_mem_info()
+        cpu = get_cpu_memory_info()
+        cpu_str = format_cpu_memory_str(cpu)
+        local_ip = get_local_ip()
+        # Get physical device ID to query correct GPU
+        physical_device_id = get_physical_device_id()
         message = (
-            f"Before {name}, memory allocated (GB): {mem_allocated}, memory reserved (GB): {mem_reserved}, "
+            f"[ip={local_ip}] Before {name}, memory allocated (GB): {mem_allocated}, memory reserved (GB): {mem_reserved}, "
             f"device memory used/total (GB): {mem_used}/{mem_total}"
+            f"memory breakdown: {get_gpu_memory_by_processes(physical_device_id)}"
+            f", cpu memory: {cpu_str}" if cpu_str else ""
         )
         self.logging_function(message)
 
         output = func(*args, **kwargs)
 
+        cpu = get_cpu_memory_info()
+        cpu_str = format_cpu_memory_str(cpu)
         mem_allocated, mem_reserved, mem_used, mem_total = _get_current_mem_info()
         message = (
-            f"After {name}, memory allocated (GB): {mem_allocated}, memory reserved (GB): {mem_reserved}, "
+            f"[ip={local_ip}] After {name}, memory allocated (GB): {mem_allocated}, memory reserved (GB): {mem_reserved}, "
             f"device memory used/total (GB): {mem_used}/{mem_total}"
+            f"memory breakdown: {get_gpu_memory_by_processes(physical_device_id)}"
+            f", cpu memory: {cpu_str}" if cpu_str else ""
         )
 
         self.logging_function(message)

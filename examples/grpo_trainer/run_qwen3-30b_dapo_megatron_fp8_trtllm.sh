@@ -40,8 +40,8 @@ fi
 # -----
 DATA_DIR=${DATA_DIR:-"$PWD"}
 
-DAPO_MATH_TRAIN=${DAPO_MATH_TRAIN:-"${DATA_DIR}/data/DAPO-Math-17k/data/dapo-math-17k.parquet"}
-AIME_VAL=${AIME_VAL:-"${DATA_DIR}/data/AIME-2024/data/aime-2024.parquet"}
+DAPO_MATH_TRAIN=${DAPO_MATH_TRAIN:-"${VERL_DIR}/data/dapo-math-17k.parquet"}
+AIME_VAL=${AIME_VAL:-"${VERL_DIR}/data/aime-2024.parquet"}
 MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-30B-A3B-Base"}
 
 # When PP=1, Megatron interleaved schedule is invalid; pass null so PP=1 works (e.g. 2-node)
@@ -140,16 +140,17 @@ python3 -m verl.trainer.main_ppo --config-path=config \
     actor_rollout_ref.rollout.val_kwargs.temperature=1.0 \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.7 \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
+    actor_rollout_ref.nccl_timeout=3600 \
     trainer.critic_warmup=0 \
     trainer.logger='["console","wandb"]' \
     trainer.project_name="${PROJECT_NAME}" \
     trainer.experiment_name=${EXP_NAME} \
     trainer.n_gpus_per_node=${GPUS_PER_NODE} \
     trainer.nnodes=${NNODES} \
-    trainer.save_freq=-1 \
+    trainer.save_freq=2 \
     trainer.test_freq=5 \
     trainer.resume_mode=auto \
     trainer.total_epochs=1000 \
     trainer.val_before_train=False \
     trainer.log_val_generations=10 \
-    "${@:2}"
+    "${@:2}" > ${EXP_NAME}.log 2>&1
